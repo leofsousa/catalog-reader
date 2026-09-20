@@ -1,0 +1,19 @@
+[project]
+name = "catalog-reader"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Leonardo Sousa", email = "leofsousa98@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf>=1.28.2",
+]
+
+[project.scripts]
+catalog-reader = "catalog_reader:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
