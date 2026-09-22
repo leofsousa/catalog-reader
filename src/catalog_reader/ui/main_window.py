@@ -5,24 +5,31 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QHBoxLayout,
     QMainWindow,
     QWidget,
     QLabel,
     QScrollArea,
     QFileDialog,
     QMessageBox,
+    QInputDialog,
     QToolBar,
     QStatusBar,
     QVBoxLayout,
+    QHBoxLayout,
     QFrame,
+    QPushButton,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
+    QSpinBox,
+    QFormLayout,
 )
 
 from catalog_reader.infrastructure.pdf_document import PdfDocument
 from catalog_reader.ui.pdf_page_view import PdfPageView
+from catalog_reader.domain.field_definition import FieldDefinition
 
 
-# Zoom: passos fixos para manter comportamento previsível
 ZOOM_LEVELS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
 ZOOM_DEFAULT_INDEX = 2  # 1.0
 
@@ -33,18 +40,21 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Catalog Reader")
         self.resize(1200, 800)
 
-        # --- Estado da aplicação -----------------------------------------
+        # --- Estado ------------------------------------------------------
         self._document: PdfDocument | None = None
-        self._current_page: int = 0            # 0-based
+        self._current_page: int = 0
         self._zoom_index: int = ZOOM_DEFAULT_INDEX
+        self._fields: list[FieldDefinition] = []
+        # Intervalo de extração (1-based, para o usuário; internamente 0-based)
+        self._range_start: int = 1
+        self._range_end: int = 1
 
-        # --- Construção da UI --------------------------------------------
+        # --- UI ----------------------------------------------------------
         self._build_toolbar()
         self._build_central_area()
         self._build_status_bar()
         self._update_ui_state()
 
-        # Foco inicial na área do PDF para que as setas funcionem de imediato
         self._page_view.setFocus()
 
     # ==================================================================
@@ -84,43 +94,83 @@ class MainWindow(QMainWindow):
         self._action_zoom_reset.triggered.connect(self._on_zoom_reset)
         toolbar.addAction(self._action_zoom_reset)
 
+        toolbar.addSeparator()
+
+        self._action_extract = QAction("Executar extração", self)
+        self._action_extract.triggered.connect(self._on_extract)
+        toolbar.addAction(self._action_extract)
+
     def _build_central_area(self) -> None:
         # ------------------------ Sidebar --------------------------------
         sidebar = QFrame()
         sidebar.setFrameShape(QFrame.StyledPanel)
-        sidebar.setFixedWidth(260)
+        sidebar.setFixedWidth(300)
 
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
-        sidebar_layout.setSpacing(10)
+        sidebar_layout.setSpacing(8)
 
         title = QLabel("Ferramentas")
         title.setStyleSheet("font-weight: bold;")
         sidebar_layout.addWidget(title)
 
-        tools_placeholder = QLabel("(em breve: seleção de regiões)")
-        tools_placeholder.setWordWrap(True)
-        sidebar_layout.addWidget(tools_placeholder)
+        self._button_draw = QPushButton("Selecionar região")
+        self._button_draw.setCheckable(True)
+        self._button_draw.toggled.connect(self._on_toggle_draw_mode)
+        sidebar_layout.addWidget(self._button_draw)
 
-        separator_h = QFrame()
-        separator_h.setFrameShape(QFrame.HLine)
-        separator_h.setFrameShadow(QFrame.Sunken)
-        sidebar_layout.addWidget(separator_h)
+        separator_h1 = QFrame()
+        separator_h1.setFrameShape(QFrame.HLine)
+        separator_h1.setFrameShadow(QFrame.Sunken)
+        sidebar_layout.addWidget(separator_h1)
 
+        # ------------------------ Intervalo ------------------------------
+        interval_title = QLabel("Intervalo de extração")
+        interval_title.setStyleSheet("font-weight: bold;")
+        sidebar_layout.addWidget(interval_title)
+
+        interval_form = QFormLayout()
+        interval_form.setContentsMargins(0, 0, 0, 0)
+        interval_form.setSpacing(6)
+
+        self._spin_start = QSpinBox()
+        self._spin_start.setMinimum(1)
+        self._spin_start.setMaximum(1)
+        self._spin_start.valueChanged.connect(self._on_range_changed)
+        interval_form.addRow("Página inicial:", self._spin_start)
+
+        self._spin_end = QSpinBox()
+        self._spin_end.setMinimum(1)
+        self._spin_end.setMaximum(1)
+        self._spin_end.valueChanged.connect(self._on_range_changed)
+        interval_form.addRow("Página final:", self._spin_end)
+
+        sidebar_layout.addLayout(interval_form)
+
+        self._range_hint = QLabel("")
+        self._range_hint.setWordWrap(True)
+        sidebar_layout.addWidget(self._range_hint)
+
+        separator_h2 = QFrame()
+        separator_h2.setFrameShape(QFrame.HLine)
+        separator_h2.setFrameShadow(QFrame.Sunken)
+        sidebar_layout.addWidget(separator_h2)
+
+        # ------------------------ Campos --------------------------------
         fields_title = QLabel("Campos definidos")
         fields_title.setStyleSheet("font-weight: bold;")
         sidebar_layout.addWidget(fields_title)
 
-        fields_placeholder = QLabel("Nenhum campo definido.")
-        fields_placeholder.setWordWrap(True)
-        sidebar_layout.addWidget(fields_placeholder)
-
-        sidebar_layout.addStretch(1)
+        self._fields_list = QListWidget()
+        self._fields_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self._fields_list.setFocusPolicy(Qt.NoFocus)
+        sidebar_layout.addWidget(self._fields_list, 1)
 
         # ------------------------ Área do PDF ----------------------------
         self._page_view = PdfPageView()
         self._page_view.setFocusPolicy(Qt.StrongFocus)
         self._page_view.pan_requested.connect(self._on_pan_requested)
+        self._page_view.region_drawn.connect(self._on_region_drawn)
 
         self._scroll_area = QScrollArea()
         self._scroll_area.setWidgetResizable(False)
@@ -132,8 +182,6 @@ class MainWindow(QMainWindow):
         self._page_view.installEventFilter(self)
 
         # ------------------------ Layout central -------------------------
-        # Ordem importa: criar o QWidget e o layout ANTES de adicionar
-        # qualquer widget nele.
         central = QWidget()
         central_layout = QHBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -141,7 +189,6 @@ class MainWindow(QMainWindow):
 
         central_layout.addWidget(sidebar)
 
-        # Linha divisória fina (visual, não arrastável)
         divider = QFrame()
         divider.setFrameShape(QFrame.VLine)
         divider.setFrameShadow(QFrame.Plain)
@@ -149,7 +196,7 @@ class MainWindow(QMainWindow):
         divider.setFixedWidth(1)
         central_layout.addWidget(divider)
 
-        central_layout.addWidget(self._scroll_area, 1)  # 1 = absorve o crescimento
+        central_layout.addWidget(self._scroll_area, 1)
 
         self.setCentralWidget(central)
 
@@ -157,8 +204,6 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Pronto")
-        
-    
 
     # ==================================================================
     # Estado da UI
@@ -175,6 +220,43 @@ class MainWindow(QMainWindow):
         )
         self._action_zoom_out.setEnabled(has_doc and self._zoom_index > 0)
         self._action_zoom_reset.setEnabled(has_doc)
+        self._button_draw.setEnabled(has_doc)
+
+        self._spin_start.setEnabled(has_doc)
+        self._spin_end.setEnabled(has_doc)
+
+        # Botão "Executar extração": habilitado quando há documento,
+        # ao menos um campo, e o intervalo é válido.
+        can_extract = (
+            has_doc
+            and len(self._fields) > 0
+            and self._range_start <= self._range_end
+        )
+        self._action_extract.setEnabled(False)  # extração real na próxima rodada
+        # (mantemos desabilitado mesmo com can_extract=True até implementarmos)
+
+        # Atualiza preview dos campos com o novo intervalo
+        if has_doc:
+            self._page_view.set_extraction_range(
+                self._range_start - 1, self._range_end - 1
+            )
+            self._page_view.set_fields(self._fields)
+
+    def _update_range_hint(self) -> None:
+        if self._document is None:
+            self._range_hint.setText("")
+            return
+        if self._range_start > self._range_end:
+            self._range_hint.setText(
+                "⚠ Página inicial maior que a final."
+            )
+            self._range_hint.setStyleSheet("color: #E0A030;")
+        else:
+            total = self._range_end - self._range_start + 1
+            self._range_hint.setText(
+                f"{total} página(s) serão processadas."
+            )
+            self._range_hint.setStyleSheet("color: #8C8C8C;")
 
     # ==================================================================
     # Ações — PDF e navegação
@@ -205,7 +287,27 @@ class MainWindow(QMainWindow):
             self._update_ui_state()
             return
 
+        # Novo documento → reseta tudo
+        self._fields.clear()
+        self._button_draw.setChecked(False)
+        self._page_view.set_draw_mode(False)
+
+        # Reset do intervalo: 1..N
+        total = self._document.page_count
+        self._spin_start.blockSignals(True)
+        self._spin_end.blockSignals(True)
+        self._spin_start.setMaximum(total)
+        self._spin_end.setMaximum(total)
+        self._spin_start.setValue(1)
+        self._spin_end.setValue(total)
+        self._spin_start.blockSignals(False)
+        self._spin_end.blockSignals(False)
+        self._range_start = 1
+        self._range_end = total
+
         self._current_page = 0
+        self._refresh_fields_list()
+        self._update_range_hint()
         self._render_current_page()
         self._update_ui_state()
         self._page_view.setFocus()
@@ -273,20 +375,125 @@ class MainWindow(QMainWindow):
         self._update_ui_state()
 
     # ==================================================================
-    # Ações — Pan (arrastar para navegar)
+    # Ações — Intervalo
+    # ==================================================================
+
+    def _on_range_changed(self) -> None:
+        self._range_start = self._spin_start.value()
+        self._range_end = self._spin_end.value()
+        self._update_range_hint()
+        self._update_ui_state()
+
+    # ==================================================================
+    # Ações — Pan
     # ==================================================================
 
     def _on_pan_requested(self, dx: int, dy: int) -> None:
-        """Move as barras de rolagem do QScrollArea conforme o arrasto.
-
-        O scroll é invertido em relação ao delta do mouse: arrastar para
-        a direita move o conteúdo para a direita, ou seja, o scroll vai
-        para a esquerda.
-        """
         hbar = self._scroll_area.horizontalScrollBar()
         vbar = self._scroll_area.verticalScrollBar()
         hbar.setValue(hbar.value() - dx)
         vbar.setValue(vbar.value() - dy)
+
+    # ==================================================================
+    # Ações — Definir campos
+    # ==================================================================
+
+    def _on_toggle_draw_mode(self, checked: bool) -> None:
+        if self._document is None:
+            self._button_draw.setChecked(False)
+            return
+        self._page_view.set_draw_mode(checked)
+        self._page_view.setFocus()
+
+    def _on_region_drawn(self, x: float, y: float, w: float, h: float) -> None:
+        name, ok = QInputDialog.getText(
+            self,
+            "Nome da informação",
+            "Nome da informação:",
+        )
+        if not ok:
+            return
+
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(
+                self,
+                "Nome inválido",
+                "O nome não pode estar vazio. O campo foi descartado.",
+            )
+            return
+
+        if any(f.name == name for f in self._fields):
+            QMessageBox.warning(
+                self,
+                "Nome duplicado",
+                f"Já existe um campo chamado '{name}'. "
+                f"Escolha outro nome. O campo foi descartado.",
+            )
+            return
+
+        field = FieldDefinition(
+            name=name,
+            x=x,
+            y=y,
+            width=w,
+            height=h,
+            source_page=self._current_page,
+        )
+        self._fields.append(field)
+        self._page_view.set_fields(self._fields)
+        self._refresh_fields_list()
+        self._update_ui_state()
+
+    def _on_remove_field(self, index: int) -> None:
+        """Apaga o campo de índice `index`."""
+        if not (0 <= index < len(self._fields)):
+            return
+        self._fields.pop(index)
+        self._page_view.set_fields(self._fields)
+        self._refresh_fields_list()
+        self._update_ui_state()
+
+    def _refresh_fields_list(self) -> None:
+        self._fields_list.clear()
+        for i, field in enumerate(self._fields):
+            self._fields_list.addItem(self._make_field_item(i, field))
+
+    def _make_field_item(self, index: int, field: FieldDefinition) -> QListWidgetItem:
+        item = QListWidgetItem()
+        widget = QWidget()
+        h = QHBoxLayout(widget)
+        h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(6)
+
+        label = QLabel(f"{field.name}  (p.{field.source_page + 1})")
+        label.setToolTip(
+            f"x={field.x:.0f}  y={field.y:.0f}  "
+            f"w={field.width:.0f}  h={field.height:.0f}"
+        )
+        h.addWidget(label, 1)
+
+        btn_remove = QPushButton("×")
+        btn_remove.setFixedWidth(24)
+        btn_remove.setToolTip("Apagar este campo")
+        btn_remove.clicked.connect(lambda _checked=False, i=index: self._on_remove_field(i))
+        h.addWidget(btn_remove, 0)
+
+        item.setSizeHint(widget.sizeHint())
+        self._fields_list.addItem(item)
+        self._fields_list.setItemWidget(item, widget)
+        return item
+
+    # ==================================================================
+    # Ações — Extração (placeholder nesta rodada)
+    # ==================================================================
+
+    def _on_extract(self) -> None:
+        QMessageBox.information(
+            self,
+            "Em breve",
+            "A extração real será implementada na próxima etapa.",
+        )
 
     # ==================================================================
     # Renderização
@@ -299,6 +506,10 @@ class MainWindow(QMainWindow):
         self._page_view.set_zoom(ZOOM_LEVELS[self._zoom_index])
         self._page_view.set_document(self._document)
         self._page_view.set_page(self._current_page)
+        self._page_view.set_extraction_range(
+            self._range_start - 1, self._range_end - 1
+        )
+        self._page_view.set_fields(self._fields)
 
         zoom_pct = int(round(ZOOM_LEVELS[self._zoom_index] * 100))
         self._status.showMessage(
@@ -312,16 +523,17 @@ class MainWindow(QMainWindow):
     # ==================================================================
 
     def eventFilter(self, watched, event) -> bool:
-        """Intercepta teclas do scroll area e do page view antes que virem
-        rolagem. Sem isso, QScrollArea trata ← / → / Home / End como
-        comandos de rolagem e o evento nunca chega em keyPressEvent.
-        """
         if event.type() == QEvent.KeyPress and watched in (
             self._scroll_area,
             self._page_view,
         ):
             key = event.key()
             mods = event.modifiers()
+
+            if key == Qt.Key_Escape:
+                if self._button_draw.isChecked():
+                    self._button_draw.setChecked(False)
+                    return True
 
             if key == Qt.Key_Right:
                 self._on_next_page()
@@ -352,6 +564,12 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event) -> None:
         key = event.key()
         mods = event.modifiers()
+
+        if key == Qt.Key_Escape:
+            if self._button_draw.isChecked():
+                self._button_draw.setChecked(False)
+                event.accept()
+                return
 
         if key == Qt.Key_Right:
             self._on_next_page()
