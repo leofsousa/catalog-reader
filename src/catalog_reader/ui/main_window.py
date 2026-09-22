@@ -3,8 +3,9 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent
-from PySide6.QtGui import QImage, QPixmap, QAction
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QMainWindow,
     QWidget,
     QLabel,
@@ -13,12 +14,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QToolBar,
     QStatusBar,
-    QSplitter,
     QVBoxLayout,
     QFrame,
 )
 
 from catalog_reader.infrastructure.pdf_document import PdfDocument
+from catalog_reader.ui.pdf_page_view import PdfPageView
 
 
 # Zoom: passos fixos para manter comportamento previsível
@@ -42,6 +43,9 @@ class MainWindow(QMainWindow):
         self._build_central_area()
         self._build_status_bar()
         self._update_ui_state()
+
+        # Foco inicial na área do PDF para que as setas funcionem de imediato
+        self._page_view.setFocus()
 
     # ==================================================================
     # Construção da UI
@@ -84,66 +88,77 @@ class MainWindow(QMainWindow):
         # ------------------------ Sidebar --------------------------------
         sidebar = QFrame()
         sidebar.setFrameShape(QFrame.StyledPanel)
-        sidebar.setMinimumWidth(200)
+        sidebar.setFixedWidth(260)
 
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
         sidebar_layout.setSpacing(10)
 
         title = QLabel("Ferramentas")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title.setStyleSheet("font-weight: bold;")
         sidebar_layout.addWidget(title)
 
-        # Área reservada para as ferramentas (preenchida em etapa futura)
         tools_placeholder = QLabel("(em breve: seleção de regiões)")
-        tools_placeholder.setStyleSheet("color: #888; font-size: 12px;")
         tools_placeholder.setWordWrap(True)
         sidebar_layout.addWidget(tools_placeholder)
 
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        sidebar_layout.addWidget(separator)
+        separator_h = QFrame()
+        separator_h.setFrameShape(QFrame.HLine)
+        separator_h.setFrameShadow(QFrame.Sunken)
+        sidebar_layout.addWidget(separator_h)
 
         fields_title = QLabel("Campos definidos")
-        fields_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        fields_title.setStyleSheet("font-weight: bold;")
         sidebar_layout.addWidget(fields_title)
 
         fields_placeholder = QLabel("Nenhum campo definido.")
-        fields_placeholder.setStyleSheet("color: #888; font-size: 12px;")
         fields_placeholder.setWordWrap(True)
         sidebar_layout.addWidget(fields_placeholder)
 
         sidebar_layout.addStretch(1)
 
         # ------------------------ Área do PDF ----------------------------
-        self._page_label = QLabel(
-            "Nenhum PDF carregado.\nUse “+ Add PDF” para começar."
-        )
-        self._page_label.setAlignment(Qt.AlignCenter)
-        self._page_label.setStyleSheet("color: #666; font-size: 14px;")
+        self._page_view = PdfPageView()
+        self._page_view.setFocusPolicy(Qt.StrongFocus)
+        self._page_view.pan_requested.connect(self._on_pan_requested)
 
         self._scroll_area = QScrollArea()
-        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setWidgetResizable(False)
         self._scroll_area.setAlignment(Qt.AlignCenter)
-        self._scroll_area.setWidget(self._page_label)
-
-        # ------------------------ Splitter -------------------------------
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(sidebar)
-        splitter.addWidget(self._scroll_area)
-        splitter.setStretchFactor(0, 0)   # sidebar: tamanho preferencial
-        splitter.setStretchFactor(1, 1)   # viewer: absorve o redimensionamento
-        splitter.setSizes([260, 940])     # largura inicial
+        self._scroll_area.setWidget(self._page_view)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
 
         self._scroll_area.installEventFilter(self)
-        self._page_label.installEventFilter(self)
-        self.setCentralWidget(splitter)
+        self._page_view.installEventFilter(self)
+
+        # ------------------------ Layout central -------------------------
+        # Ordem importa: criar o QWidget e o layout ANTES de adicionar
+        # qualquer widget nele.
+        central = QWidget()
+        central_layout = QHBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        central_layout.addWidget(sidebar)
+
+        # Linha divisória fina (visual, não arrastável)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Plain)
+        divider.setStyleSheet("background: #8C8C8C;")
+        divider.setFixedWidth(1)
+        central_layout.addWidget(divider)
+
+        central_layout.addWidget(self._scroll_area, 1)  # 1 = absorve o crescimento
+
+        self.setCentralWidget(central)
 
     def _build_status_bar(self) -> None:
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Pronto")
+        
+    
 
     # ==================================================================
     # Estado da UI
@@ -187,13 +202,13 @@ class MainWindow(QMainWindow):
                 "Erro ao abrir PDF",
                 f"Não foi possível abrir o arquivo:\n\n{exc}",
             )
-            self._page_label.setText("Nenhum PDF carregado.")
             self._update_ui_state()
             return
 
         self._current_page = 0
         self._render_current_page()
         self._update_ui_state()
+        self._page_view.setFocus()
 
     def _on_prev_page(self) -> None:
         if self._document is None or self._current_page == 0:
@@ -258,6 +273,22 @@ class MainWindow(QMainWindow):
         self._update_ui_state()
 
     # ==================================================================
+    # Ações — Pan (arrastar para navegar)
+    # ==================================================================
+
+    def _on_pan_requested(self, dx: int, dy: int) -> None:
+        """Move as barras de rolagem do QScrollArea conforme o arrasto.
+
+        O scroll é invertido em relação ao delta do mouse: arrastar para
+        a direita move o conteúdo para a direita, ou seja, o scroll vai
+        para a esquerda.
+        """
+        hbar = self._scroll_area.horizontalScrollBar()
+        vbar = self._scroll_area.verticalScrollBar()
+        hbar.setValue(hbar.value() - dx)
+        vbar.setValue(vbar.value() - dy)
+
+    # ==================================================================
     # Renderização
     # ==================================================================
 
@@ -265,22 +296,11 @@ class MainWindow(QMainWindow):
         if self._document is None:
             return
 
-        zoom = ZOOM_LEVELS[self._zoom_index]
-        pixmap = self._document.render_page(self._current_page, zoom=zoom)
+        self._page_view.set_zoom(ZOOM_LEVELS[self._zoom_index])
+        self._page_view.set_document(self._document)
+        self._page_view.set_page(self._current_page)
 
-        image = QImage(
-            pixmap.samples,
-            pixmap.width,
-            pixmap.height,
-            pixmap.stride,
-            QImage.Format_RGB888,
-        ).copy()
-
-        self._page_label.setPixmap(QPixmap.fromImage(image))
-        self._page_label.setText("")
-        self._page_label.adjustSize()
-
-        zoom_pct = int(round(zoom * 100))
+        zoom_pct = int(round(ZOOM_LEVELS[self._zoom_index] * 100))
         self._status.showMessage(
             f"{self._document.name} — página "
             f"{self._current_page + 1} de {self._document.page_count} "
@@ -290,11 +310,15 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # Teclado
     # ==================================================================
+
     def eventFilter(self, watched, event) -> bool:
-        
+        """Intercepta teclas do scroll area e do page view antes que virem
+        rolagem. Sem isso, QScrollArea trata ← / → / Home / End como
+        comandos de rolagem e o evento nunca chega em keyPressEvent.
+        """
         if event.type() == QEvent.KeyPress and watched in (
             self._scroll_area,
-            self._page_label,
+            self._page_view,
         ):
             key = event.key()
             mods = event.modifiers()
@@ -346,7 +370,6 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
-        # Ctrl + '+' / Ctrl + '-' / Ctrl + '0'
         if mods & Qt.ControlModifier:
             if key in (Qt.Key_Plus, Qt.Key_Equal):
                 self._on_zoom_in()
