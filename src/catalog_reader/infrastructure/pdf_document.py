@@ -22,11 +22,11 @@ class PdfDocument:
     def name(self) -> str:
         return self.path.name
 
-    def render_page(self, page_index: int, zoom: float = 1.5) -> pymupdf.Pixmap:
+    def render_page(self, page_index: int, zoom: float = 1.0) -> pymupdf.Pixmap:
         """Renderiza uma página (0-based) e devolve um Pixmap do PyMuPDF.
 
-        zoom=1.5 é um valor de conforto visual (108 DPI).
-        Zoom ajustável virá em etapa futura.
+        zoom=1.0 corresponde a 72 DPI (escala natural do PDF).
+        Valores maiores aumentam a resolução de renderização.
         """
         if not (0 <= page_index < self.page_count):
             raise IndexError(
